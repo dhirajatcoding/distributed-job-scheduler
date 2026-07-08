@@ -1,0 +1,67 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/job_scheduler
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+
+  jpa:
+    hibernate:
+      ddl-auto: none
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+
+  sql:
+    init:
+      mode: always
+
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      timeout: 2000ms
+      lettuce:
+        pool:
+          max-active: 8
+          min-idle: 2
+
+server:
+  port: 8080
+
+scheduler:
+  poll-interval-ms: 5000           # How often the engine checks for due jobs
+  batch-size: 20                   # Max jobs to dispatch per poll cycle
+  stale-detection-interval-ms: 60000  # How often the stale job detector runs
+
+leader:
+  ttl-seconds: 15                  # Leader lease duration — new leader elected within this window on crash
+  refresh-interval-ms: 5000        # How often the leader renews its lease (must be < ttl-seconds)
+
+lock:
+  job-ttl-minutes: 5               # Max time a job lock is held — set to max expected job execution time
+
+worker:
+  thread-pool-size: 10
+  thread-name-prefix: job-worker-
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      application: job-scheduler
+    distribution:
+      percentiles-histogram:
+        scheduler.job.execution.duration: true

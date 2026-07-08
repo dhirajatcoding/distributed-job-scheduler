@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Job Scheduler</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:system-ui,-apple-system,sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh}</style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="react">
+    const API = window.location.origin;
+    const { useState, useEffect, useCallback } = React;
+
+    // ── Fetch helpers ──────────────────────────────────────────────────────────
+    async function apiFetch(path, opts = {}) {
+      const r = await fetch(API + path, {
+        headers: { 'Content-Type': 'application/json' },
+        ...opts
+      });
+      if (!r.ok) throw new Error(await r.text());
+      return r.json();
+    }
+
+    // ── Status config ──────────────────────────────────────────────────────────
+    const STATUS = {
+      SCHEDULED: { bg: '#14532d', text: '#4ade80', label: 'Scheduled' },
+      RUNNING:   { bg: '#1e3a5f', text: '#60a5fa', label: 'Running'   },
+      WAITING:   { bg: '#451a03', text: '#fbbf24', label: 'Waiting'   },
+      PAUSED:    { bg: '#1c1917', text: '#a8a29e', label: 'Paused'    },
+      COMPLETED: { bg: '#134e4a', text: '#2dd4bf', label: 'Completed' },
+      DEAD:      { bg: '#450a0a', text: '#f87171', label: 'Dead'      },
+    };
+
+    function Badge({ status }) {
+      const s = STATUS[status] || { bg: '#1e293b', text: '#94a3b8', label: status };
+      return (
+        <span style={{
+          background: s.bg, color: s.text,
+          padding: '2px 10px', borderRadius: 99, fontSize: 12, fontWeight: 600,
+          letterSpacing: '0.03em'
+        }}>{s.label}</span>
+      );
+    }
+
+    function Stat({ label, value, color = '#e2e8f0' }) {
+      return (
+        <div style={{ background: '#1e2433', borderRadius: 10, padding: '18px 24px', minWidth: 120 }}>
+          <div style={{ fontSize: 28, fontWeight: 700, color, fontVariantNumeric: 'tabular-nums' }}>
+            {value ?? '—'}
+          </div>
+          <div style={{ fontSize: 12, color: '#64748b', marginTop: 4, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            {label}
+          </div>
+        </div>
+      );
+    }
+
+    function Btn({ onClick, children, variant = 'ghost', disabled }) {
+      const styles = {
+        ghost:   { background: 'transparent', color: '#94a3b8', border: '1px solid #334155' },
+        primary: { background: '#2563eb',      color: '#fff',     border: 'none' },
+        danger:  { background: '#7f1d1d',      color: '#fca5a5',  border: 'none' },
+        success: { background: '#14532d',      color: '#4ade80',  border: 'none' },
+      };
+      return (
+        <button
+          onClick={onClick}
+          disabled={disabled}
+          style={{
+            ...styles[variant],
+            padding: '5px 12px', borderRadius: 6, fontSize: 12, cursor: disabled ? 'not-allowed' : 'pointer',
+            opacity: disabled ? 0.5 : 1, fontWeight: 500
+          }}
+        >{children}</button>
+      );
+    }
+
+    // ── Jobs Tab ───────────────────────────────────────────────────────────────
+    function JobsTab({ jobs, onRefresh }) {
+      const [selected, setSelected] = useState(null);
+      const [executions, setExecutions] = useState([]);
+      const [loadingExec, setLoadingExec] = useState(false);
+
+      async function loadExecutions(id) {
+        setSelected(id);
+        setLoadingExec(true);
+        try {
+          const data = await apiFetch(`/api/v1/jobs/${id}/executions`);
+          setExecutions(data);
+        } catch { setExecutions([]); }
+        setLoadingExec(false);
+      }
+
+      async function action(type, id) {
+        try {
+          if (type === 'trigger') await apiFetch(`/api/v1/jobs/${id}/trigger`, { method: 'POST' });
+          if (type === 'pause')   await apiFetch(`/api/v1/jobs/${id}/pause`,   { method: 'PATCH' });
+          if (type === 'resume')  await apiFetch(`/api/v1/jobs/${id}/resume`,  { method: 'PATCH' });
+          if (type === 'delete') {
+            if (!confirm('Delete this job?')) return;
+            await apiFetch(`/api/v1/jobs/${id}`, { method: 'DELETE' });
+          }
+          onRefresh();
+        } catch (e) { alert('Action failed: ' + e.message); }
+      }
+
+      function fmtTime(ts) {
+        if (!ts) return '—';
+        const d = new Date(ts);
+        const now = new Date();
+        const diff = d - now;
+        if (Math.abs(diff) < 60000) return 'now';
+        if (diff > 0 && diff < 3600000) return `in ${Math.round(diff/60000)}m`;
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      }
+
+      return (
+        <div style={{ display: 'grid', gridTemplateColumns: selected ? '1fr 380px' : '1fr', gap: 16 }}>
+          {/* Jobs table */}
+          <div style={{ background: '#1e2433', borderRadius: 12, overflow: 'hidden' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid #334155' }}>
+                  {['Name','Type','Status','Next run','Actions'].map(h => (
+                    <th key={h} style={{ padding: '12px 16px', textAlign: 'left', fontSize: 11,
+                      color: '#64748b', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {jobs.length === 0 && (
+                  <tr><td colSpan={5} style={{ padding: 32, textAlign: 'center', color: '#475569' }}>
+                    No jobs registered yet. Use the API to register your first job.
+                  </td></tr>
+                )}
+                {jobs.map(j => (
+                  <tr key={j.id}
+                    onClick={() => loadExecutions(j.id)}
+                    style={{
+                      borderBottom: '1px solid #1a2030', cursor: 'pointer',
+                      background: selected === j.id ? '#0f1829' : 'transparent',
+                      transition: 'background 0.1s'
+                    }}>
+                    <td style={{ padding: '12px 16px' }}>
+                      <div style={{ fontWeight: 500, fontSize: 14 }}>{j.name}</div>
+                      <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>{j.id.slice(0,8)}…</div>
+                    </td>
+                    <td style={{ padding: '12px 16px' }}>
+                      <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#94a3b8',
+                        background: '#0f1117', padding: '2px 7px', borderRadius: 4 }}>{j.jobType}</span>
+                    </td>
+                    <td style={{ padding: '12px 16px' }}><Badge status={j.status}/></td>
+                    <td style={{ padding: '12px 16px', fontSize: 13, color: '#94a3b8' }}>
+                      {fmtTime(j.nextRunAt)}
+                    </td>
+                    <td style={{ padding: '12px 16px' }}>
+                      <div style={{ display: 'flex', gap: 6 }} onClick={e => e.stopPropagation()}>
+                        <Btn onClick={() => action('trigger', j.id)} disabled={j.status === 'RUNNING'}>▶ Run</Btn>
+                        {j.status === 'SCHEDULED' && <Btn onClick={() => action('pause', j.id)}>⏸</Btn>}
+                        {j.status === 'PAUSED'    && <Btn onClick={() => action('resume', j.id)} variant="success">▶</Btn>}
+                        <Btn onClick={() => action('delete', j.id)} variant="danger">✕</Btn>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Execution panel */}
+          {selected && (
+            <div style={{ background: '#1e2433', borderRadius: 12, overflow: 'hidden' }}>
+              <div style={{ padding: '14px 18px', borderBottom: '1px solid #334155', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontWeight: 600, fontSize: 14 }}>Execution history</span>
+                <button onClick={() => setSelected(null)} style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: 16 }}>✕</button>
+              </div>
+              <div style={{ padding: 16, maxHeight: 480, overflowY: 'auto' }}>
+                {loadingExec && <div style={{ color: '#64748b', textAlign: 'center', padding: 24 }}>Loading…</div>}
+                {!loadingExec && executions.length === 0 && (
+                  <div style={{ color: '#475569', textAlign: 'center', padding: 24 }}>No executions yet.</div>
+                )}
+                {executions.map(e => (
+                  <div key={e.id} style={{ marginBottom: 12, padding: 14, background: '#0f1117', borderRadius: 8,
+                    borderLeft: `3px solid ${e.status === 'SUCCEEDED' ? '#4ade80' : e.status === 'RUNNING' ? '#60a5fa' : '#f87171'}` }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                      <span style={{ fontSize: 12, fontWeight: 600 }}>Attempt #{e.attemptNumber}</span>
+                      <Badge status={e.status === 'SUCCEEDED' ? 'COMPLETED' : e.status === 'RUNNING' ? 'RUNNING' : 'DEAD'}/>
+                    </div>
+                    <div style={{ fontSize: 11, color: '#64748b', marginBottom: e.errorMessage ? 6 : 0 }}>
+                      {new Date(e.startedAt).toLocaleString()}
+                      {e.finishedAt && ` · ${Math.round((new Date(e.finishedAt)-new Date(e.startedAt))/1000)}s`}
+                    </div>
+                    {e.workerId && <div style={{ fontSize: 11, color: '#475569', marginBottom: 4 }}>Worker: {e.workerId}</div>}
+                    {e.errorMessage && (
+                      <div style={{ fontSize: 11, color: '#fca5a5', marginTop: 6, fontFamily: 'monospace',
+                        background: '#1a0a0a', padding: '6px 10px', borderRadius: 4 }}>{e.errorMessage}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ── DLQ Tab ────────────────────────────────────────────────────────────────
+    function DlqTab({ onRefresh }) {
+      const [dlq, setDlq] = useState([]);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        apiFetch('/api/v1/dlq').then(setDlq).catch(() => setDlq([])).finally(() => setLoading(false));
+      }, []);
+
+      async function requeue(id) {
+        try {
+          await apiFetch(`/api/v1/dlq/${id}/requeue`, { method: 'POST' });
+          setDlq(d => d.filter(e => e.id !== id));
+          onRefresh();
+        } catch (e) { alert('Requeue failed: ' + e.message); }
+      }
+
+      return (
+        <div style={{ background: '#1e2433', borderRadius: 12, overflow: 'hidden' }}>
+          <div style={{ padding: '14px 18px', borderBottom: '1px solid #334155' }}>
+            <span style={{ fontWeight: 600, fontSize: 14 }}>Dead letter queue</span>
+            <span style={{ marginLeft: 10, fontSize: 12, color: '#64748b' }}>
+              {dlq.length} {dlq.length === 1 ? 'entry' : 'entries'}
+            </span>
+          </div>
+          <div style={{ padding: 16 }}>
+            {loading && <div style={{ color: '#64748b', textAlign: 'center', padding: 24 }}>Loading…</div>}
+            {!loading && dlq.length === 0 && (
+              <div style={{ color: '#475569', textAlign: 'center', padding: 40, fontSize: 14 }}>
+                ✓ Dead letter queue is empty.
+              </div>
+            )}
+            {dlq.map(e => (
+              <div key={e.id} style={{ marginBottom: 12, padding: 16, background: '#0f1117',
+                borderRadius: 8, borderLeft: '3px solid #f87171' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>{e.job?.name}</div>
+                    <div style={{ fontSize: 11, color: '#64748b' }}>
+                      Failed at {new Date(e.failedAt).toLocaleString()}
+                    </div>
+                    {e.failureReason && (
+                      <div style={{ fontSize: 11, color: '#fca5a5', fontFamily: 'monospace',
+                        marginTop: 8, background: '#1a0a0a', padding: '6px 10px', borderRadius: 4 }}>
+                        {e.failureReason}
+                      </div>
+                    )}
+                  </div>
+                  <Btn onClick={() => requeue(e.id)} variant="success">↩ Requeue</Btn>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // ── Metrics Tab ────────────────────────────────────────────────────────────
+    function MetricsTab({ metrics }) {
+      if (!metrics) return <div style={{ padding: 40, color: '#64748b', textAlign: 'center' }}>Loading metrics…</div>;
+
+      const bars = Object.entries(metrics.byStatus || {}).map(([k, v]) => ({ label: k, value: v, color: (STATUS[k] || {}).text || '#94a3b8' }));
+      const maxVal = Math.max(...bars.map(b => b.value), 1);
+
+      return (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          {/* Status distribution chart */}
+          <div style={{ background: '#1e2433', borderRadius: 12, padding: 24 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 20, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              Job status distribution
+            </div>
+            {bars.map(b => (
+              <div key={b.label} style={{ marginBottom: 14 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
+                  <span style={{ fontSize: 12, color: b.color }}>{b.label}</span>
+                  <span style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums', color: '#e2e8f0' }}>{b.value}</span>
+                </div>
+                <div style={{ background: '#0f1117', borderRadius: 4, height: 6, overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${(b.value / maxVal) * 100}%`,
+                    background: b.color, borderRadius: 4, transition: 'width 0.4s' }}/>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* System info */}
+          <div style={{ background: '#1e2433', borderRadius: 12, padding: 24 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 20, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              Scheduler state
+            </div>
+            {[
+              { label: 'Node ID',        value: metrics.nodeId },
+              { label: 'Is leader',      value: metrics.isLeader ? '✓ Yes' : '✗ No', color: metrics.isLeader ? '#4ade80' : '#f87171' },
+              { label: 'Current leader', value: metrics.currentLeader },
+              { label: 'Total jobs',     value: metrics.totalJobs },
+              { label: 'DLQ size',       value: metrics.dlqSize },
+            ].map(r => (
+              <div key={r.label} style={{ display: 'flex', justifyContent: 'space-between',
+                padding: '10px 0', borderBottom: '1px solid #1a2030' }}>
+                <span style={{ fontSize: 13, color: '#64748b' }}>{r.label}</span>
+                <span style={{ fontSize: 13, color: r.color || '#e2e8f0', fontFamily: r.label === 'Node ID' ? 'monospace' : 'inherit', fontWeight: 500 }}>
+                  {String(r.value ?? '—')}
+                </span>
+              </div>
+            ))}
+            <div style={{ marginTop: 20, padding: '12px 14px', background: '#0f1117', borderRadius: 8, fontSize: 11, color: '#475569' }}>
+              Full Micrometer metrics available at{' '}
+              <a href="/actuator/metrics" target="_blank" style={{ color: '#60a5fa' }}>/actuator/metrics</a>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── App shell ──────────────────────────────────────────────────────────────
+    function App() {
+      const [tab, setTab] = useState('jobs');
+      const [jobs, setJobs] = useState([]);
+      const [metrics, setMetrics] = useState(null);
+      const [autoRefresh, setAutoRefresh] = useState(true);
+      const [lastUpdated, setLastUpdated] = useState(null);
+      const [error, setError] = useState(null);
+
+      const refresh = useCallback(async () => {
+        try {
+          const [j, m] = await Promise.all([
+            apiFetch('/api/v1/jobs'),
+            apiFetch('/api/v1/metrics'),
+          ]);
+          setJobs(j);
+          setMetrics(m);
+          setLastUpdated(new Date());
+          setError(null);
+        } catch (e) {
+          setError('Could not reach API at ' + API);
+        }
+      }, []);
+
+      useEffect(() => { refresh(); }, [refresh]);
+      useEffect(() => {
+        if (!autoRefresh) return;
+        const id = setInterval(refresh, 5000);
+        return () => clearInterval(id);
+      }, [autoRefresh, refresh]);
+
+      const tabs = [
+        { id: 'jobs',    label: `Jobs ${jobs.length > 0 ? `(${jobs.length})` : ''}` },
+        { id: 'dlq',     label: `DLQ ${metrics?.dlqSize > 0 ? `(${metrics.dlqSize})` : ''}` },
+        { id: 'metrics', label: 'Metrics' },
+      ];
+
+      const counts = {
+        SCHEDULED: jobs.filter(j => j.status === 'SCHEDULED').length,
+        RUNNING:   jobs.filter(j => j.status === 'RUNNING').length,
+        WAITING:   jobs.filter(j => j.status === 'WAITING').length,
+        DEAD:      jobs.filter(j => j.status === 'DEAD').length,
+      };
+
+      return (
+        <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 24px 40px' }}>
+          {/* Header */}
+          <div style={{ padding: '24px 0 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #1e2433', marginBottom: 24 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{ width: 32, height: 32, background: '#2563eb', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16 }}>⚙</div>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 16 }}>Job Scheduler</div>
+                <div style={{ fontSize: 11, color: '#475569' }}>
+                  {metrics?.nodeId ? `Node: ${metrics.nodeId.slice(0, 16)}…` : 'Connecting…'}
+                  {metrics?.isLeader && <span style={{ marginLeft: 8, color: '#4ade80' }}>● leader</span>}
+                </div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              {lastUpdated && (
+                <span style={{ fontSize: 11, color: '#475569' }}>
+                  Updated {lastUpdated.toLocaleTimeString()}
+                </span>
+              )}
+              <Btn onClick={() => setAutoRefresh(a => !a)} variant={autoRefresh ? 'primary' : 'ghost'}>
+                {autoRefresh ? '⟳ Auto' : '⟳ Paused'}
+              </Btn>
+              <Btn onClick={refresh}>Refresh</Btn>
+            </div>
+          </div>
+
+          {error && (
+            <div style={{ background: '#450a0a', border: '1px solid #7f1d1d', borderRadius: 8,
+              padding: '12px 16px', marginBottom: 20, fontSize: 13, color: '#fca5a5' }}>
+              {error}
+            </div>
+          )}
+
+          {/* Stat cards */}
+          <div style={{ display: 'flex', gap: 12, marginBottom: 24, flexWrap: 'wrap' }}>
+            <Stat label="Scheduled" value={counts.SCHEDULED} color="#4ade80"/>
+            <Stat label="Running"   value={counts.RUNNING}   color="#60a5fa"/>
+            <Stat label="Waiting"   value={counts.WAITING}   color="#fbbf24"/>
+            <Stat label="Dead"      value={counts.DEAD}       color="#f87171"/>
+            <Stat label="DLQ"       value={metrics?.dlqSize ?? 0} color="#f87171"/>
+          </div>
+
+          {/* Tabs */}
+          <div style={{ display: 'flex', gap: 4, marginBottom: 20, borderBottom: '1px solid #1e2433', paddingBottom: 0 }}>
+            {tabs.map(t => (
+              <button key={t.id} onClick={() => setTab(t.id)} style={{
+                padding: '8px 18px', background: 'none', border: 'none',
+                borderBottom: tab === t.id ? '2px solid #2563eb' : '2px solid transparent',
+                color: tab === t.id ? '#e2e8f0' : '#64748b',
+                cursor: 'pointer', fontSize: 14, fontWeight: tab === t.id ? 600 : 400,
+                marginBottom: -1, transition: 'color 0.15s'
+              }}>{t.label}</button>
+            ))}
+          </div>
+
+          {/* Tab content */}
+          {tab === 'jobs'    && <JobsTab jobs={jobs} onRefresh={refresh}/>}
+          {tab === 'dlq'     && <DlqTab onRefresh={refresh}/>}
+          {tab === 'metrics' && <MetricsTab metrics={metrics}/>}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+  </script>
+</body>
+</html>
